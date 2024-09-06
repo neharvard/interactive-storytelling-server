@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config()
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const app = express();
 const port = process.env.PORT || 5000;
 
@@ -13,15 +13,17 @@ const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  }
+    serverApi: {
+        version: ServerApiVersion.v1,
+        strict: true,
+        deprecationErrors: true,
+    }
 });
 
 // Creating DB In MongoDB
 const storyCollection = client.db('storyDB').collection('story');
+const interactionCollection = client.db('storyDB').collection('interactions');
+const readerChoicesCollection = client.db('storyDB').collection('readerChoices');
 
 // Endpoint to create a story
 app.post('/story', async (req, res) => {
@@ -30,23 +32,75 @@ app.post('/story', async (req, res) => {
     res.send(result);
 });
 
- 
+
+// Endpoint to get all stories
+app.get('/allStory', async (req, res) => {
+    try {
+        const stories = await storyCollection.find().toArray();
+        res.send(stories);
+    } catch (error) {
+        console.error('Error fetching stories:', error);
+        res.status(500).send('Error fetching stories');
+    }
+});
 
 
-// async function run() {
-//   try {
-//     // Connect the client to the server	(optional starting in v4.7)
-//     await client.connect();
-//     // Send a ping to confirm a successful connection
-//     await client.db("admin").command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
-//   } finally {
-//     // Ensures that the client will close when you finish/error
-//     await client.close();
-//   }
-// }
-// run().catch(console.dir);
+// Endpoint to get a specific story
+app.get('/story/:id', async (req, res) => {
+    try {
+        const storyId = req.params.id;
+        const story = await storyCollection.findOne({ _id: new ObjectId(storyId) });
+        if (story) {
+            res.json(story);
+        } else {
+            res.status(404).json({ error: 'Story not found' });
+        }
+    } catch (error) {
+        console.error('Error fetching story:', error);
+        res.status(500).json({ error: 'Error fetching story' });
+    }
+});
 
+
+// Track interactions like which path was chosen and time spent on the path
+app.post('/story/interaction', async (req, res) => {
+    const { storyId, pathTitle, timeSpent } = req.body;
+
+    const interaction = {
+        storyId: new ObjectId(storyId),
+        pathTitle,
+        timeSpent,
+        timestamp: new Date(),
+    };
+
+    try {
+        await interactionCollection.insertOne(interaction);
+        res.status(200).send('Interaction recorded');
+    } catch (error) {
+        console.error('Error recording interaction:', error);
+        res.status(500).send('Error recording interaction');
+    }
+});
+
+// Track user choices for popularity
+app.post('/story/trackChoices', async (req, res) => {
+    const { storyId, pathTitle } = req.body;
+
+    try {
+        await readerChoicesCollection.updateOne(
+            { storyId: new ObjectId(storyId) },
+            { $inc: { [`choices.${pathTitle}`]: 1 } },
+            { upsert: true }
+        );
+        res.status(200).send('Choice recorded');
+    } catch (error) {
+        console.error('Error recording choice:', error);
+        res.status(500).send('Error recording choice');
+    }
+});
+
+
+console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
 app.get('/', (req, res) => {
     res.send('Story Telling Platform is Running')
