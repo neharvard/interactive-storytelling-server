@@ -45,10 +45,16 @@ app.get('/allStory', async (req, res) => {
 });
 
 
-// Endpoint to get a specific story
+// Endpoint to get a specific story PREVIOUS
 app.get('/story/:id', async (req, res) => {
     try {
         const storyId = req.params.id;
+
+        // Validate the storyId to make sure it is a valid 24-character hex string
+        if (!ObjectId.isValid(storyId)) {
+            return res.status(400).json({ error: 'Invalid story ID' });
+        }
+
         const story = await storyCollection.findOne({ _id: new ObjectId(storyId) });
         if (story) {
             res.json(story);
@@ -61,10 +67,14 @@ app.get('/story/:id', async (req, res) => {
     }
 });
 
-
 // Track interactions like which path was chosen and time spent on the path
 app.post('/story/interaction', async (req, res) => {
     const { storyId, pathTitle, timeSpent } = req.body;
+
+    // Validate the storyId to make sure it is a valid 24-character hex string
+    if (!ObjectId.isValid(storyId)) {
+        return res.status(400).json({ error: 'Invalid story ID' });
+    }
 
     const interaction = {
         storyId: new ObjectId(storyId),
@@ -82,15 +92,45 @@ app.post('/story/interaction', async (req, res) => {
     }
 });
 
+app.get('/story/interaction', async (req, res) => {
+    try {
+        console.log('Incoming request to /story/interaction');
+        const interactions = await interactionCollection.find().toArray();
+        if (!interactions) {
+            return res.status(400).json({ message: 'No interactions found' });
+        }
+        res.json(interactions);
+    } catch (error) {
+        console.error('Error fetching interaction data:', error);
+        res.status(500).json({ message: 'Error fetching interaction data' });
+    }
+});
+
+
+// app.get('/story/interaction', async (req, res) => {
+//     try {
+//         const interactions = await interactionCollection.find().toArray();
+//         res.json(interactions);
+//     } catch (error) {
+//         console.error('Error fetching interaction data:', error);
+//         res.status(500).json({ message: 'Error fetching interaction data' });
+//     }
+// });
+
+
+
 // Track user choices for popularity
 app.post('/story/trackChoices', async (req, res) => {
-    const { storyId, pathTitle } = req.body;
+    const { storyId, pathTitle, userId } = req.body; // Make sure you send userId if necessary
 
     try {
         await readerChoicesCollection.updateOne(
-            { storyId: new ObjectId(storyId) },
-            { $inc: { [`choices.${pathTitle}`]: 1 } },
-            { upsert: true }
+            { storyId: new ObjectId(storyId), pathTitle },
+            { 
+                $inc: { count: 1 },
+                $setOnInsert: { storyId: new ObjectId(storyId), pathTitle, userId }, // Optional: Track userId
+            },
+            { upsert: true } // Creates new entry if it doesn't exist
         );
         res.status(200).send('Choice recorded');
     } catch (error) {
@@ -99,6 +139,46 @@ app.post('/story/trackChoices', async (req, res) => {
     }
 });
 
+
+// Endpoint to get path popularity for a specific story
+app.get('/story/:id/popularity', async (req, res) => {
+    try {
+        const storyId = new ObjectId(req.params.id);
+        const choices = await readerChoicesCollection.findOne({ storyId });
+        res.json(choices);
+    } catch (error) {
+        console.error('Error fetching popularity data:', error);
+        res.status(500).send('Error fetching popularity data');
+    }
+});
+
+// Endpoint to get time spent insights
+app.get('/story/:id/timeSpent', async (req, res) => {
+    const storyId = req.params.id;
+
+    // Validate if the provided storyId is a valid ObjectId
+    if (!ObjectId.isValid(storyId)) {
+        return res.status(400).json({ error: 'Invalid story ID format' });
+    }
+
+    try {
+        const timeSpentData = await interactionCollection.aggregate([
+            { $match: { storyId: new ObjectId(storyId) } },
+            {
+                $group: {
+                    _id: "$pathTitle",
+                    averageTimeSpent: { $avg: "$timeSpent" },
+                    totalTimeSpent: { $sum: "$timeSpent" }
+                }
+            }
+        ]).toArray();
+
+        res.json(timeSpentData);
+    } catch (error) {
+        console.error('Error fetching time spent data:', error);
+        res.status(500).json({ error: 'Error fetching time spent insights' });
+    }
+});
 
 console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
