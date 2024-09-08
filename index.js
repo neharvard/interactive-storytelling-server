@@ -48,7 +48,7 @@ app.get('/allStory', async (req, res) => {
 // Endpoint to get a specific story PREVIOUS
 app.get('/story/:id', async (req, res) => {
     try {
-        const storyId = req.params.id;
+        const storyId = req.params.id; console.log(storyId);
 
         // Validate the storyId to make sure it is a valid 24-character hex string
         if (!ObjectId.isValid(storyId)) {
@@ -69,17 +69,21 @@ app.get('/story/:id', async (req, res) => {
 
 // Track interactions like which path was chosen and time spent on the path
 app.post('/story/interaction', async (req, res) => {
-    const { storyId, pathTitle, timeSpent } = req.body;
+    const { storyId, pathTitle, timeSpent, title } = req.body;
 
     // Validate the storyId to make sure it is a valid 24-character hex string
     if (!ObjectId.isValid(storyId)) {
         return res.status(400).json({ error: 'Invalid story ID' });
     }
 
+    // Convert timeSpent string (e.g., "3 sec") to numerical value (in seconds)
+    const timeInSeconds = parseInt(timeSpent) || 0;
+
     const interaction = {
         storyId: new ObjectId(storyId),
         pathTitle,
-        timeSpent,
+        title,
+        timeSpent: timeInSeconds, // Store time as number
         timestamp: new Date(),
     };
 
@@ -93,46 +97,62 @@ app.post('/story/interaction', async (req, res) => {
 });
 
 app.get('/story/interaction', async (req, res) => {
+    const storyId = req.query.storyId;
+
+    if (!storyId) {
+        return res.status(400).json({ error: "Missing storyId parameter" });
+    }
     try {
-        console.log('Incoming request to /story/interaction');
-        const interactions = await interactionCollection.find().toArray();
-        if (!interactions) {
-            return res.status(400).json({ message: 'No interactions found' });
-        }
+        const interactions = await interactionCollection.aggregate([
+            {
+                // Convert storyId from string to ObjectId
+                $addFields: {
+                    storyId: { $toObjectId: "$storyId" }
+                }
+            },
+            {
+                $lookup: {
+                    from: 'stories',
+                    localField: 'storyId',
+                    foreignField: '_id',
+                    as: 'storyDetails',
+                },
+            },
+            { $unwind: '$storyDetails' },
+            {
+                $project: {
+                    _id: 1,
+                    pathTitle: 1,
+                    timeSpent: 1,
+                    timestamp: 1,
+                    storyTitle: '$storyDetails.title',
+                },
+            },
+        ]).toArray();
+
         res.json(interactions);
     } catch (error) {
         console.error('Error fetching interaction data:', error);
-        res.status(500).json({ message: 'Error fetching interaction data' });
+        res.status(400).json({ message: 'Error fetching interaction data' });
     }
 });
 
 
-// app.get('/story/interaction', async (req, res) => {
-//     try {
-//         const interactions = await interactionCollection.find().toArray();
-//         res.json(interactions);
-//     } catch (error) {
-//         console.error('Error fetching interaction data:', error);
-//         res.status(500).json({ message: 'Error fetching interaction data' });
-//     }
-// });
-
-
-
 // Track user choices for popularity
 app.post('/story/trackChoices', async (req, res) => {
-    const { storyId, pathTitle, userId } = req.body; // Make sure you send userId if necessary
-
+    const { storyId, pathTitle, userId, title  } = req.body; // Make sure you send userId if necessary
+    console.log("Before:", storyId);
     try {
         await readerChoicesCollection.updateOne(
-            { storyId: new ObjectId(storyId), pathTitle },
+            { storyId: new ObjectId(storyId),title, pathTitle },
             { 
                 $inc: { count: 1 },
-                $setOnInsert: { storyId: new ObjectId(storyId), pathTitle, userId }, // Optional: Track userId
+                $setOnInsert: { storyId: new ObjectId(storyId),userId , title, pathTitle }, // Optional: Track userId
             },
             { upsert: true } // Creates new entry if it doesn't exist
         );
         res.status(200).send('Choice recorded');
+        console.log("after:", storyId);
     } catch (error) {
         console.error('Error recording choice:', error);
         res.status(500).send('Error recording choice');
@@ -140,11 +160,18 @@ app.post('/story/trackChoices', async (req, res) => {
 });
 
 
+
 // Endpoint to get path popularity for a specific story
 app.get('/story/:id/popularity', async (req, res) => {
     try {
         const storyId = new ObjectId(req.params.id);
-        const choices = await readerChoicesCollection.findOne({ storyId });
+
+        const choices = await readerChoicesCollection.aggregate([
+            { $match: { storyId } }, // Find the relevant story
+            { $group: { _id: "$pathTitle", count: { $sum: "$count" } } }, // Group by pathTitle and sum the counts
+            { $sort: { count: -1 } } // Sort by count descending
+        ]).toArray();
+
         res.json(choices);
     } catch (error) {
         console.error('Error fetching popularity data:', error);
@@ -152,17 +179,24 @@ app.get('/story/:id/popularity', async (req, res) => {
     }
 });
 
-// Endpoint to get time spent insights
+
 app.get('/story/:id/timeSpent', async (req, res) => {
     const storyId = req.params.id;
 
-    // Validate if the provided storyId is a valid ObjectId
     if (!ObjectId.isValid(storyId)) {
         return res.status(400).json({ error: 'Invalid story ID format' });
     }
 
     try {
-        const timeSpentData = await interactionCollection.aggregate([
+        // Fetch the story to get all its paths
+        const story = await storyCollection.findOne({ _id: new ObjectId(storyId) });
+
+        if (!story) {
+            return res.status(404).json({ error: 'Story not found' });
+        }
+
+        // Get interactions grouped by pathTitle
+        const interactionData = await interactionCollection.aggregate([
             { $match: { storyId: new ObjectId(storyId) } },
             {
                 $group: {
@@ -173,12 +207,24 @@ app.get('/story/:id/timeSpent', async (req, res) => {
             }
         ]).toArray();
 
+        // Combine the interaction data with all story paths
+        const timeSpentData = story.storyPaths.map(path => {
+            const interaction = interactionData.find(i => i._id === path.pathTitle);
+            return {
+                pathTitle: path.pathTitle,
+                averageTimeSpent: interaction ? interaction.averageTimeSpent : null,
+                totalTimeSpent: interaction ? interaction.totalTimeSpent : null
+            };
+        });
+
         res.json(timeSpentData);
     } catch (error) {
         console.error('Error fetching time spent data:', error);
         res.status(500).json({ error: 'Error fetching time spent insights' });
     }
 });
+
+
 
 console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
